@@ -10,16 +10,17 @@ These correlations were generated from NLA files downloaded on June 24, 2026 wit
 
 | Series | Firm-quarter Pearson | Quarter Pearson | Matched firm-quarters | Quarters |
 |---|---:|---:|---:|---:|
-| `PRisk` | 0.905168 | 0.981506 | 310,303 | 81 |
-| `PSentiment` | 0.856298 | 0.945560 | 310,303 | 81 |
-| `PRiskT_economic` | 0.908175 | 0.991983 | 310,303 | 81 |
-| `PRiskT_environment` | 0.858467 | 0.982627 | 310,303 | 81 |
-| `PRiskT_trade` | 0.806010 | 0.953507 | 310,303 | 81 |
-| `PRiskT_institutions` | 0.893494 | 0.985902 | 310,303 | 81 |
-| `PRiskT_health` | 0.850774 | 0.981758 | 310,303 | 81 |
-| `PRiskT_security` | 0.815520 | 0.966916 | 310,303 | 81 |
-| `PRiskT_tax` | 0.903212 | 0.989223 | 310,303 | 81 |
-| `PRiskT_technology` | 0.868482 | 0.985101 | 310,303 | 81 |
+| `PRisk` | 0.91 | 0.98 | 310,303 | 81 |
+| `PSentiment` | 0.86 | 0.95 | 310,303 | 81 |
+| `PRiskT_economic` | 0.91 | 0.99 | 310,303 | 81 |
+| `PRiskT_environment` | 0.86 | 0.98 | 310,303 | 81 |
+| `PRiskT_trade` | 0.81 | 0.95 | 310,303 | 81 |
+| `PRiskT_institutions` | 0.89 | 0.99 | 310,303 | 81 |
+| `PRiskT_health` | 0.85 | 0.98 | 310,303 | 81 |
+| `PRiskT_security` | 0.82 | 0.97 | 310,303 | 81 |
+| `PRiskT_tax` | 0.90 | 0.99 | 310,303 | 81 |
+| `PRiskT_technology` | 0.87 | 0.99 | 310,303 | 81 |
+| Average | 0.87 | 0.98 | - | - |
 
 ## Data
 
