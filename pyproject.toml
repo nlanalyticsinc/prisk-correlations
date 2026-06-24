@@ -1,0 +1,14 @@
+[project]
+name = "prisk-replication"
+version = "0.1.0"
+description = "Correlation checks for reproduced PRisk scores against original firm-quarter scores."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+notebook = [
+    "ipykernel>=6",
+    "jupyterlab>=4",
+    "nbconvert>=7",
+]
