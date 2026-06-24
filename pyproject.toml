@@ -1,7 +1,7 @@
 [project]
 name = "prisk-replication"
 version = "0.1.0"
-description = "Correlation checks for reproduced PRisk scores against original firm-quarter scores."
+description = "Correlation checks for reproduced NLA PRisk, PSentiment, and PRiskT scores against original firm-quarter measures."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

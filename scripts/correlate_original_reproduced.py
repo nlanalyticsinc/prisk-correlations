@@ -9,10 +9,13 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 
-ORIGINAL_FILE = Path("data/original/scores/firmquarter_2022q1.csv")
-DEFAULT_REPRODUCED_DIRS = (Path("data/reproduced_v2"), Path("data/reproduced_v2.1"))
+ORIGINAL_DIR = Path("data/original")
+REPRODUCED_DIR = Path("data/reproduced")
+ORIGINAL_FILE_PATTERNS = ("firmquarter_*.csv", "firmlevel_*.csv")
+REPRODUCED_FILE_PREFIX = "NLA_"
 
 
 @dataclass(frozen=True)
@@ -83,14 +86,27 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--reproduced-dir",
-        action="append",
         type=Path,
+        default=REPRODUCED_DIR,
         help=(
-            "Directory containing *_firmlevel.csv files. Can be repeated. "
-            "Defaults to available reproduced_v2 and reproduced_v2.1 directories."
+            "Directory containing NLA *_firmlevel.csv files. "
+            f"Defaults to {REPRODUCED_DIR}."
         ),
     )
-    parser.add_argument("--original-file", type=Path, default=ORIGINAL_FILE)
+    parser.add_argument(
+        "--original-dir",
+        type=Path,
+        default=ORIGINAL_DIR,
+        help=(
+            "Directory containing exactly one original score CSV matching "
+            f"{', '.join(ORIGINAL_FILE_PATTERNS)}. Defaults to {ORIGINAL_DIR}."
+        ),
+    )
+    parser.add_argument(
+        "--original-file",
+        type=Path,
+        help="Explicit original score CSV. Overrides --original-dir.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("data/correlations"))
     return parser.parse_args()
 
@@ -150,9 +166,41 @@ def format_float(value: object) -> object:
     return value
 
 
-def available_reproduced_dirs(explicit_dirs: list[Path] | None) -> list[Path]:
-    candidates = explicit_dirs if explicit_dirs else list(DEFAULT_REPRODUCED_DIRS)
-    return [path for path in candidates if path.exists()]
+def format_pearson(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.6f}"
+
+
+def format_elapsed(start: float) -> str:
+    return f"{perf_counter() - start:.1f}s"
+
+
+def resolve_original_file(original_dir: Path, explicit_file: Path | None) -> Path:
+    if explicit_file is not None:
+        if not explicit_file.exists():
+            raise FileNotFoundError(f"Original file not found: {explicit_file}")
+        return explicit_file
+
+    candidates: list[Path] = []
+    for pattern in ORIGINAL_FILE_PATTERNS:
+        candidates.extend(sorted(original_dir.glob(pattern)))
+
+    if not candidates:
+        patterns = ", ".join(ORIGINAL_FILE_PATTERNS)
+        raise FileNotFoundError(f"No original score CSV matching {patterns} under {original_dir}")
+    if len(candidates) > 1:
+        names = ", ".join(path.name for path in candidates)
+        raise ValueError(f"Multiple original score CSVs found under {original_dir}: {names}")
+    return candidates[0]
+
+
+def resolve_reproduced_dir(reproduced_dir: Path) -> Path:
+    if not reproduced_dir.exists():
+        raise FileNotFoundError(f"Reproduced directory not found: {reproduced_dir}")
+    if not reproduced_dir.is_dir():
+        raise NotADirectoryError(f"Reproduced path is not a directory: {reproduced_dir}")
+    return reproduced_dir
 
 
 def read_original(
@@ -160,7 +208,7 @@ def read_original(
     columns: set[str],
 ) -> dict[str, dict[tuple[str, str], float]]:
     by_column: dict[str, dict[tuple[str, str], float]] = defaultdict(dict)
-    sums: dict[tuple[str, tuple[str, str]], tuple[float, int]] = defaultdict(lambda: (0.0, 0))
+    seen_keys: set[tuple[str, str]] = set()
 
     with original_file.open(newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -176,22 +224,26 @@ def read_original(
             if not gvkey or not dateq:
                 continue
             key = (gvkey, dateq)
+            if key in seen_keys:
+                raise ValueError(
+                    f"{original_file} contains duplicate original firm-quarter row: "
+                    f"gvkey={gvkey}, date={dateq}"
+                )
+            seen_keys.add(key)
+
             for column in columns:
                 value = parse_float(row.get(column))
                 if value is None:
                     continue
-                agg_key = (column, key)
-                total, count = sums[agg_key]
-                sums[agg_key] = (total + value, count + 1)
-
-    for (column, key), (total, count) in sums.items():
-        by_column[column][key] = total / count
+                by_column[column][key] = value
 
     return by_column
 
 
 def resolve_reproduced_file(reproduced_dir: Path, spec: SeriesSpec) -> Path | None:
-    candidates = sorted(reproduced_dir.glob(f"*{spec.file_fragment}*_firmlevel.csv"))
+    candidates = sorted(
+        reproduced_dir.glob(f"{REPRODUCED_FILE_PREFIX}*{spec.file_fragment}*_firmlevel.csv")
+    )
     if not candidates:
         return None
     if len(candidates) > 1:
@@ -242,12 +294,16 @@ def build_correlation_rows(
     dateq_rows: list[dict[str, object]] = []
     skipped: list[str] = []
 
-    for spec in SERIES_SPECS:
+    for index, spec in enumerate(SERIES_SPECS, start=1):
+        step_start = perf_counter()
+        print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: locating NLA file...", flush=True)
         reproduced_file = resolve_reproduced_file(version_dir, spec)
         if reproduced_file is None:
+            print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: no matching file found; skipping", flush=True)
             skipped.append(spec.series)
             continue
 
+        print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: loading {reproduced_file.name}", flush=True)
         loaded = load_reproduced_series(reproduced_file, spec)
         original_values = original_by_column[spec.original_column]
         common_keys = sorted(set(loaded.values).intersection(original_values))
@@ -269,6 +325,8 @@ def build_correlation_rows(
             dateq_pairs.append((reproduced_mean, original_mean))
 
         common_dateqs = sorted(set(matched_dateqs))
+        gvkey_dateq_pearson = pearson(gvkey_dateq_pairs)
+        dateq_pearson = pearson(dateq_pairs)
         base = {
             "series": spec.series,
             "original_column": spec.original_column,
@@ -283,7 +341,7 @@ def build_correlation_rows(
                 "level": "gvkey-dateQ",
                 "n_pairs": len(gvkey_dateq_pairs),
                 "n_dateQ": len(common_dateqs),
-                "pearson": pearson(gvkey_dateq_pairs),
+                "pearson": gvkey_dateq_pearson,
             }
         )
         dateq_rows.append(
@@ -292,8 +350,15 @@ def build_correlation_rows(
                 "level": "dateQ",
                 "n_pairs": len(dateq_pairs),
                 "matched_gvkey_dateQ": len(gvkey_dateq_pairs),
-                "pearson": pearson(dateq_pairs),
+                "pearson": dateq_pearson,
             }
+        )
+        print(
+            f"[{index}/{len(SERIES_SPECS)}] {spec.series}: matched "
+            f"{len(gvkey_dateq_pairs):,} firm-quarters across {len(common_dateqs):,} quarters "
+            f"(firm-quarter r={format_pearson(gvkey_dateq_pearson)}, "
+            f"quarter r={format_pearson(dateq_pearson)}, {format_elapsed(step_start)})",
+            flush=True,
         )
 
     return gvkey_dateq_rows, dateq_rows, skipped
@@ -308,72 +373,44 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
             writer.writerow({field: format_float(row.get(field, "")) for field in fieldnames})
 
 
-def write_version_outputs(
-    out_dir: Path,
-    version_name: str,
-    gvkey_dateq_rows: list[dict[str, object]],
-    dateq_rows: list[dict[str, object]],
-) -> tuple[Path, Path]:
-    gvkey_dateq_path = out_dir / f"{version_name}_gvkey_dateq_correlations.csv"
-    dateq_path = out_dir / f"{version_name}_dateq_correlations.csv"
-    write_csv(gvkey_dateq_path, gvkey_dateq_rows, GVKEY_DATEQ_FIELDS)
-    write_csv(dateq_path, dateq_rows, DATEQ_FIELDS)
-    return gvkey_dateq_path, dateq_path
-
-
-def with_version(rows: list[dict[str, object]], version_name: str) -> list[dict[str, object]]:
-    return [{"reproduced_version": version_name, **row} for row in rows]
-
-
 def main() -> None:
+    run_start = perf_counter()
     args = parse_args()
-    reproduced_dirs = available_reproduced_dirs(args.reproduced_dir)
-    if not reproduced_dirs:
-        raise SystemExit("No reproduced directories found.")
+    reproduced_dir = resolve_reproduced_dir(args.reproduced_dir)
+    original_file = resolve_original_file(args.original_dir, args.original_file)
+
+    print(f"Original file: {original_file}", flush=True)
+    print(f"Reproduced directory: {reproduced_dir}", flush=True)
 
     original_columns = {spec.original_column for spec in SERIES_SPECS}
-    original_by_column = read_original(args.original_file, original_columns)
+    print("Reading original firm-quarter scores...", flush=True)
+    original_by_column = read_original(original_file, original_columns)
+    original_key_count = len({key for values in original_by_column.values() for key in values})
+    print(
+        f"Loaded original scores for {original_key_count:,} firm-quarters "
+        f"across {len(original_columns)} series ({format_elapsed(run_start)}).",
+        flush=True,
+    )
 
-    all_gvkey_dateq_rows: list[dict[str, object]] = []
-    all_dateq_rows: list[dict[str, object]] = []
-    for reproduced_dir in reproduced_dirs:
-        version_name = reproduced_dir.name
-        gvkey_dateq_rows, dateq_rows, skipped = build_correlation_rows(
-            reproduced_dir,
-            original_by_column,
-        )
-        if not gvkey_dateq_rows:
-            print(f"Skipped {version_name}: no matching firmlevel files")
-            continue
+    print("Reading reproduced NLA files and computing correlations...", flush=True)
+    gvkey_dateq_rows, dateq_rows, skipped = build_correlation_rows(
+        reproduced_dir,
+        original_by_column,
+    )
+    if not gvkey_dateq_rows:
+        raise SystemExit(f"No matching NLA firmlevel files found under {reproduced_dir}.")
 
-        gvkey_dateq_path, dateq_path = write_version_outputs(
-            args.out_dir,
-            version_name,
-            gvkey_dateq_rows,
-            dateq_rows,
-        )
-        print(f"Wrote {gvkey_dateq_path}")
-        print(f"Wrote {dateq_path}")
+    gvkey_dateq_path = args.out_dir / "firm_quarter_correlations.csv"
+    dateq_path = args.out_dir / "quarterly_mean_correlations.csv"
+    print(f"Writing correlation outputs to {args.out_dir}...", flush=True)
+    write_csv(gvkey_dateq_path, gvkey_dateq_rows, GVKEY_DATEQ_FIELDS)
+    write_csv(dateq_path, dateq_rows, DATEQ_FIELDS)
+    print(f"Wrote {gvkey_dateq_path}")
+    print(f"Wrote {dateq_path}")
 
-        if skipped:
-            print(f"{version_name}: skipped unavailable series: {', '.join(skipped)}")
-
-        all_gvkey_dateq_rows.extend(with_version(gvkey_dateq_rows, version_name))
-        all_dateq_rows.extend(with_version(dateq_rows, version_name))
-
-    if all_gvkey_dateq_rows:
-        write_csv(
-            args.out_dir / "reproduced_versions_gvkey_dateq_correlations.csv",
-            all_gvkey_dateq_rows,
-            ["reproduced_version", *GVKEY_DATEQ_FIELDS],
-        )
-        write_csv(
-            args.out_dir / "reproduced_versions_dateq_correlations.csv",
-            all_dateq_rows,
-            ["reproduced_version", *DATEQ_FIELDS],
-        )
-        print(f"Wrote {args.out_dir / 'reproduced_versions_gvkey_dateq_correlations.csv'}")
-        print(f"Wrote {args.out_dir / 'reproduced_versions_dateq_correlations.csv'}")
+    if skipped:
+        print(f"Skipped unavailable series: {', '.join(skipped)}")
+    print(f"Done in {format_elapsed(run_start)}.", flush=True)
 
 
 if __name__ == "__main__":
