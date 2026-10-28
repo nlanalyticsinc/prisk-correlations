@@ -1,0 +1,11 @@
+series,original_column,reproduced_value,reproduced_file,first_dateQ,last_dateQ,level,n_pairs,matched_gvkey_dateQ,pearson
+PRisk,PRisk,risk / nr_of_words,01-prisk-and-psentiment-v21-67e91380/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.981420135267868
+PSentiment,PSentiment,sentiment / nr_of_words,01-prisk-and-psentiment-v21-67e91380/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.945561941073295
+PRiskT_economic,PRiskT_economic,risk / nr_of_words,02-topic-based-prisk-economy-v21-48b5c0a6/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.992080353782899
+PRiskT_environment,PRiskT_environment,risk / nr_of_words,03-topic-based-prisk-environment-v21-9de50ab6/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.98262430399011
+PRiskT_trade,PRiskT_trade,risk / nr_of_words,09-topic-based-prisk-trade-v21-45a8c11c/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.95468202168762
+PRiskT_institutions,PRiskT_institutions,risk / nr_of_words,05-topic-based-prisk-institutions-v21-6687e12f/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.986210651276873
+PRiskT_health,PRiskT_health,risk / nr_of_words,04-topic-based-prisk-health-v21-f46cf5ed/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.981706682081291
+PRiskT_security,PRiskT_security,risk / nr_of_words,06-topic-based-prisk-security-v21-38ed823b/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.967000102244443
+PRiskT_tax,PRiskT_tax,risk / nr_of_words,07-topic-based-prisk-tax-v21-241dc566/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.989385969790494
+PRiskT_technology,PRiskT_technology,risk / nr_of_words,08-topic-based-prisk-technology-v21-f70b42f9/firmlevel.csv.gz,2002q1,2022q1,dateQ,81,310303,0.984805386315876

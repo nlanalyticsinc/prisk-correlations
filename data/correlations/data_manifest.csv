@@ -1,0 +1,12 @@
+role,path,bytes,rows,sha256
+original_csv,data/original/firmquarter_2022q1.csv,80089270,354518,9516b807c727a332ac66f28a5f2b7dcb7ce78893797afaa448bd54c35864d7ff
+reproduced_csv,data/reproduced/series/01-prisk-and-psentiment-v21-67e91380/firmlevel.csv.gz,56958896,469708,844e5ef4ae3a8ee9dab8a35a208c75f5c0223030ec568b2de14e3c17c47bb3ec
+reproduced_csv,data/reproduced/series/02-topic-based-prisk-economy-v21-48b5c0a6/firmlevel.csv.gz,42912354,469708,09f63f5f0417e49e66de0c43d5f6409b6a6b950d05ef128ca15f3baf42ed9508
+reproduced_csv,data/reproduced/series/03-topic-based-prisk-environment-v21-9de50ab6/firmlevel.csv.gz,42905795,469708,04ec5c2424c1e5e773737118668d01e7a7db5cd17ae823bef56bf90da7926a6a
+reproduced_csv,data/reproduced/series/04-topic-based-prisk-health-v21-f46cf5ed/firmlevel.csv.gz,42894646,469708,ad1b756805269cd4b76b2afa0a6307d78b5bba049831dd9548323de906a730de
+reproduced_csv,data/reproduced/series/05-topic-based-prisk-institutions-v21-6687e12f/firmlevel.csv.gz,42873631,469708,1ffe669a35d937746a2845a98f86a783a290ec9913b5d1ad8f742f624d050dfb
+reproduced_csv,data/reproduced/series/06-topic-based-prisk-security-v21-38ed823b/firmlevel.csv.gz,42927387,469708,843ea66806a3fbce5caf6b74c5f478271fb5d722f616779b1de801b4aef20ae3
+reproduced_csv,data/reproduced/series/07-topic-based-prisk-tax-v21-241dc566/firmlevel.csv.gz,42836159,469708,11157f77268270a06bf85d2e7c3e397ac4ff75968eb2272c359c76f1c2c227dc
+reproduced_csv,data/reproduced/series/08-topic-based-prisk-technology-v21-f70b42f9/firmlevel.csv.gz,42821968,469708,b70a73665a5e919f093a6501c4ddc5d4e548afa6a20dc52772ebad5b55b97c0f
+reproduced_csv,data/reproduced/series/09-topic-based-prisk-trade-v21-45a8c11c/firmlevel.csv.gz,42701533,469708,fb3dd19367cdc43ff95ec72adbe76917205c3b440fa4641f9aefa600e4c0f7d4
+gvkey_crosswalk,data/reproduced/gvkeys.csv.gz,11711346,469708,b22e13e8ec764749861630bb8d0eb2adfe345c7c186943e53effa8ebaba5e343
