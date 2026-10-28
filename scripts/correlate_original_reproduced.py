@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import hashlib
 import math
 import re
 from collections import defaultdict
@@ -13,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import TextIO
-
 
 ORIGINAL_DIR = Path("data/original")
 REPRODUCED_DIR = Path("data/reproduced")
@@ -68,7 +68,12 @@ SERIES_SPECS = [
     SeriesSpec("PRisk", "PRisk", "risk", "prisk-and-psentiment"),
     SeriesSpec("PSentiment", "PSentiment", "sentiment", "prisk-and-psentiment"),
     SeriesSpec("PRiskT_economic", "PRiskT_economic", "risk", "topic-based-prisk-economy"),
-    SeriesSpec("PRiskT_environment", "PRiskT_environment", "risk", "topic-based-prisk-environment"),
+    SeriesSpec(
+        "PRiskT_environment",
+        "PRiskT_environment",
+        "risk",
+        "topic-based-prisk-environment",
+    ),
     SeriesSpec("PRiskT_trade", "PRiskT_trade", "risk", "topic-based-prisk-trade"),
     SeriesSpec(
         "PRiskT_institutions",
@@ -211,12 +216,6 @@ def pearson(pairs: list[tuple[float, float]]) -> float | None:
     return sxy / math.sqrt(sxx * syy)
 
 
-def mean(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-
 def format_float(value: object) -> object:
     if isinstance(value, float):
         return f"{value:.15g}"
@@ -342,7 +341,7 @@ def read_original(
         reader = csv.DictReader(handle, delimiter="\t")
         if reader.fieldnames is None:
             raise ValueError(f"Missing header in {original_file}")
-        missing = columns.difference(reader.fieldnames)
+        missing = (columns | {"gvkey", "date"}).difference(reader.fieldnames)
         if missing:
             raise ValueError(f"{original_file} is missing columns: {', '.join(sorted(missing))}")
 
@@ -468,6 +467,44 @@ def load_reproduced_series(
     )
 
 
+@dataclass(frozen=True)
+class SeriesComparison:
+    n_pairs: int
+    n_quarters: int
+    first_dateq: str
+    last_dateq: str
+    firm_pearson: float | None
+    quarter_pearson: float | None
+
+
+def compare_series(
+    original: dict[tuple[str, str], float],
+    reproduced: dict[tuple[str, str], float],
+) -> SeriesComparison:
+    """Compare firm-quarters and quarterly means on the same matched sample."""
+    common_keys = sorted(original.keys() & reproduced.keys())
+    pairs = [(reproduced[key], original[key]) for key in common_keys]
+    by_quarter: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for key, pair in zip(common_keys, pairs):
+        by_quarter[key[1]].append(pair)
+    quarters = sorted(by_quarter)
+    quarter_pairs = [
+        (
+            sum(x for x, _ in by_quarter[q]) / len(by_quarter[q]),
+            sum(y for _, y in by_quarter[q]) / len(by_quarter[q]),
+        )
+        for q in quarters
+    ]
+    return SeriesComparison(
+        n_pairs=len(pairs),
+        n_quarters=len(quarters),
+        first_dateq=quarters[0] if quarters else "",
+        last_dateq=quarters[-1] if quarters else "",
+        firm_pearson=pearson(pairs),
+        quarter_pearson=pearson(quarter_pairs),
+    )
+
+
 def build_correlation_rows(
     version_dir: Path,
     original_by_column: dict[str, dict[tuple[str, str], float]],
@@ -479,69 +516,57 @@ def build_correlation_rows(
 
     for index, spec in enumerate(SERIES_SPECS, start=1):
         step_start = perf_counter()
-        print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: locating NLA file...", flush=True)
+        print(
+            f"[{index}/{len(SERIES_SPECS)}] {spec.series}: locating NLA file...",
+            flush=True,
+        )
         reproduced_file = resolve_reproduced_file(version_dir, spec)
         if reproduced_file is None:
-            print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: no matching file found; skipping", flush=True)
+            print(
+                f"[{index}/{len(SERIES_SPECS)}] {spec.series}: no matching file found; skipping",
+                flush=True,
+            )
             skipped.append(spec.series)
             continue
 
         reproduced_label = reproduced_file_label(reproduced_file)
-        print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: loading {reproduced_label}", flush=True)
+        print(
+            f"[{index}/{len(SERIES_SPECS)}] {spec.series}: loading {reproduced_label}",
+            flush=True,
+        )
         loaded = load_reproduced_series(reproduced_file, spec, gvkey_crosswalk)
-        original_values = original_by_column[spec.original_column]
-        common_keys = sorted(set(loaded.values).intersection(original_values))
-        gvkey_dateq_pairs = [(loaded.values[key], original_values[key]) for key in common_keys]
-        matched_dateqs = [key[1] for key in common_keys]
-
-        dateq_reproduced_values: dict[str, list[float]] = defaultdict(list)
-        dateq_original_values: dict[str, list[float]] = defaultdict(list)
-        for key in common_keys:
-            dateq_reproduced_values[key[1]].append(loaded.values[key])
-            dateq_original_values[key[1]].append(original_values[key])
-
-        dateq_pairs: list[tuple[float, float]] = []
-        for dateq in sorted(set(dateq_reproduced_values).intersection(dateq_original_values)):
-            reproduced_mean = mean(dateq_reproduced_values[dateq])
-            original_mean = mean(dateq_original_values[dateq])
-            if reproduced_mean is None or original_mean is None:
-                continue
-            dateq_pairs.append((reproduced_mean, original_mean))
-
-        common_dateqs = sorted(set(matched_dateqs))
-        gvkey_dateq_pearson = pearson(gvkey_dateq_pairs)
-        dateq_pearson = pearson(dateq_pairs)
+        comparison = compare_series(original_by_column[spec.original_column], loaded.values)
         base = {
             "series": spec.series,
             "original_column": spec.original_column,
             "reproduced_value": spec.reproduced_value,
             "reproduced_file": reproduced_label,
-            "first_dateQ": common_dateqs[0] if common_dateqs else "",
-            "last_dateQ": common_dateqs[-1] if common_dateqs else "",
+            "first_dateQ": comparison.first_dateq,
+            "last_dateQ": comparison.last_dateq,
         }
         gvkey_dateq_rows.append(
             {
                 **base,
                 "level": "gvkey-dateQ",
-                "n_pairs": len(gvkey_dateq_pairs),
-                "n_dateQ": len(common_dateqs),
-                "pearson": gvkey_dateq_pearson,
+                "n_pairs": comparison.n_pairs,
+                "n_dateQ": comparison.n_quarters,
+                "pearson": comparison.firm_pearson,
             }
         )
         dateq_rows.append(
             {
                 **base,
                 "level": "dateQ",
-                "n_pairs": len(dateq_pairs),
-                "matched_gvkey_dateQ": len(gvkey_dateq_pairs),
-                "pearson": dateq_pearson,
+                "n_pairs": comparison.n_quarters,
+                "matched_gvkey_dateQ": comparison.n_pairs,
+                "pearson": comparison.quarter_pearson,
             }
         )
         print(
             f"[{index}/{len(SERIES_SPECS)}] {spec.series}: matched "
-            f"{len(gvkey_dateq_pairs):,} firm-quarters across {len(common_dateqs):,} quarters "
-            f"(firm-quarter r={format_pearson(gvkey_dateq_pearson)}, "
-            f"quarter r={format_pearson(dateq_pearson)}, "
+            f"{comparison.n_pairs:,} firm-quarters across {comparison.n_quarters:,} quarters "
+            f"(firm-quarter r={format_pearson(comparison.firm_pearson)}, "
+            f"quarter r={format_pearson(comparison.quarter_pearson)}, "
             f"{loaded.calls_without_gvkey:,} calls without a GVKEY, {format_elapsed(step_start)})",
             flush=True,
         )
@@ -552,10 +577,43 @@ def build_correlation_rows(
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({field: format_float(row.get(field, "")) for field in fieldnames})
+
+
+def write_manifest(
+    path: Path,
+    original_file: Path,
+    reproduced_files: list[Path],
+    crosswalk_file: Path | None,
+) -> None:
+    """Identify the exact inputs, including a crosswalk only when it was used."""
+    inputs = [("original_csv", original_file)]
+    inputs.extend(("reproduced_csv", file) for file in sorted(set(reproduced_files)))
+    if crosswalk_file is not None:
+        inputs.append(("gvkey_crosswalk", crosswalk_file))
+    rows = []
+    for role, file in inputs:
+        digest = hashlib.sha256()
+        with file.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        with open_csv(file) as handle:
+            reader = csv.reader(handle, delimiter="\t" if role == "original_csv" else ",")
+            next(reader, None)
+            count = sum(1 for _ in reader)
+        rows.append(
+            {
+                "role": role,
+                "path": str(file),
+                "bytes": file.stat().st_size,
+                "rows": count,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    write_csv(path, rows, ["role", "path", "bytes", "rows", "sha256"])
 
 
 def main() -> None:
@@ -568,11 +626,15 @@ def main() -> None:
     print(f"Reproduced directory: {reproduced_dir}", flush=True)
 
     gvkey_crosswalk = None
+    crosswalk_file = None
     if needs_gvkey_crosswalk(reproduced_dir):
         crosswalk_file = resolve_gvkey_crosswalk(reproduced_dir, args.gvkeys_file)
         gvkey_crosswalk = read_gvkey_crosswalk(crosswalk_file)
         mapped_calls = sum(bool(gvkey) for gvkey in gvkey_crosswalk.values())
-        print(f"GVKEY crosswalk: {crosswalk_file} ({mapped_calls:,} calls with a GVKEY)", flush=True)
+        print(
+            f"GVKEY crosswalk: {crosswalk_file} ({mapped_calls:,} calls with a GVKEY)",
+            flush=True,
+        )
 
     original_columns = {spec.original_column for spec in SERIES_SPECS}
     print("Reading original firm-quarter scores...", flush=True)
@@ -598,6 +660,12 @@ def main() -> None:
     print(f"Writing correlation outputs to {args.out_dir}...", flush=True)
     write_csv(gvkey_dateq_path, gvkey_dateq_rows, GVKEY_DATEQ_FIELDS)
     write_csv(dateq_path, dateq_rows, DATEQ_FIELDS)
+    reproduced_files = [
+        file for spec in SERIES_SPECS if (file := resolve_reproduced_file(reproduced_dir, spec)) is not None
+    ]
+    manifest_path = args.out_dir / "data_manifest.csv"
+    write_manifest(manifest_path, original_file, reproduced_files, crosswalk_file)
+    print(f"Wrote {manifest_path}")
     print(f"Wrote {gvkey_dateq_path}")
     print(f"Wrote {dateq_path}")
 

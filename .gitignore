@@ -1,3 +1,12 @@
 venv/
-data/
 */__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# Keep raw downloads private; track only aggregate results and input provenance.
+data/*
+!data/correlations/
+data/correlations/*
+!data/correlations/firm_quarter_correlations.csv
+!data/correlations/quarterly_mean_correlations.csv
+!data/correlations/data_manifest.csv

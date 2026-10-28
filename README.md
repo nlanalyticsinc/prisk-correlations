@@ -10,6 +10,7 @@ These correlations were generated from `nla_political-risk_dataset_2026-09-30.zi
 
 The matched sample is the same as with the files downloaded on June 24, 2026, which still carried a `gvkey` column. The newer files add calls only in 2026, after the matched period, and the crosswalk assigns every matched call the GVKEY that the June files carried. The October 2026 refresh rescored a small share of earlier calls, so correlations moved by at most 0.0021. At two decimals, only the `PRiskT_technology` quarter correlation changes, from 0.99 to 0.98.
 
+<!-- headline-table:start -->
 | Series | Firm-quarter Pearson | Quarter Pearson | Matched firm-quarters | Quarters |
 |---|---:|---:|---:|---:|
 | `PRisk` | 0.91 | 0.98 | 310,303 | 81 |
@@ -23,6 +24,7 @@ The matched sample is the same as with the files downloaded on June 24, 2026, wh
 | `PRiskT_tax` | 0.90 | 0.99 | 310,303 | 81 |
 | `PRiskT_technology` | 0.87 | 0.98 | 310,303 | 81 |
 | Average | 0.87 | 0.98 | - | - |
+<!-- headline-table:end -->
 
 ## Data
 
@@ -111,7 +113,7 @@ The command-line script uses only the Python standard library:
 python3 scripts/correlate_original_reproduced.py
 ```
 
-With all expected NLA files present, the full run is roughly a 45-50 second job on the current local machine; the latest local validation run, on the October 2026 ZIP, completed in 48.0 seconds. Most of that time is spent reading and aggregating the reproduced firm-level CSVs.
+The full October 2026 run, including input hashing and manifest row counts, completed in 60.2 seconds on the validation machine. Runtime depends on the machine and inputs; most work is reading and aggregating the reproduced firm-level CSVs.
 
 Override the reproduced-data directory explicitly:
 
@@ -129,6 +131,8 @@ The script writes outputs to `data/correlations/`.
 
 ## Tests
 
+CI runs the tests on Python 3.10 and 3.12. Numerical fixtures check the word-weighted aggregation, Pearson coefficients and quarterly means restricted to matched firms.
+
 The tests use small synthetic files only. They do not need the original CSV or NLA downloads.
 
 ```sh
@@ -139,10 +143,15 @@ venv/bin/pytest
 
 ## Outputs
 
+Generate the headline table from the CSV outputs with `python scripts/render_headline.py`. To update this README, run `python scripts/render_headline.py --readme README.md`. The notebook uses the same renderer.
+
 The main generated files are:
 
 - `data/correlations/firm_quarter_correlations.csv`
 - `data/correlations/quarterly_mean_correlations.csv`
+- `data/correlations/data_manifest.csv`
+
+These small generated outputs are tracked in git. The manifest records the path, byte size, data-row count and SHA-256 hash of the original file, each used reproduced file and the crosswalk when used. Downloaded inputs remain untracked.
 
 Use the `pearson` column as the main validation statistic. Values close to 1, together with large matched sample sizes, are the evidence that the NLA series closely track the original paper-based measures. The `gvkey-dateQ` output is the stricter firm-quarter comparison; the `dateQ` output compares quarterly means after matching firm-quarter observations. The `n_pairs`, `n_dateQ`, and `matched_gvkey_dateQ` columns show the matched sample size behind each correlation. The `reproduced_file` column names the NLA file used; for a file from the ZIP it includes its series folder.
 
