@@ -5,17 +5,43 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import TextIO
 
 
 ORIGINAL_DIR = Path("data/original")
 REPRODUCED_DIR = Path("data/reproduced")
 ORIGINAL_FILE_PATTERNS = ("firmquarter_*.csv", "firmlevel_*.csv")
 REPRODUCED_FILE_PREFIX = "NLA_"
+# Series pages download flat NLA_*_firmlevel.csv files; the measure's
+# "Download dataset (ZIP)" bundle has series/<NN>-<series>-<id>/firmlevel.csv.gz.
+REPRODUCED_FILE_PATTERNS = (
+    REPRODUCED_FILE_PREFIX + "*{fragment}*_firmlevel.csv",
+    REPRODUCED_FILE_PREFIX + "*{fragment}*_firmlevel.csv.gz",
+    "*{fragment}*/firmlevel.csv",
+    "*{fragment}*/firmlevel.csv.gz",
+    "series/*{fragment}*/firmlevel.csv",
+    "series/*{fragment}*/firmlevel.csv.gz",
+)
+# Firm-level files downloaded since October 2026 have no gvkey column. GVKEY is in the
+# measure's crosswalk, joined on earningscallID: gvkeys.csv(.gz) at the root of the ZIP,
+# or NLA_*_gvkeys.csv from a series page.
+GVKEY_CROSSWALK_PATTERNS = (
+    "gvkeys.csv",
+    "gvkeys.csv.gz",
+    REPRODUCED_FILE_PREFIX + "*_gvkeys.csv",
+    REPRODUCED_FILE_PREFIX + "*_gvkeys.csv.gz",
+)
+CALL_ID_COLUMN = "earningscallID"
+CROSSWALK_GVKEY_COLUMN = "gvkey_compustat"
+GZIP_MAGIC = b"\x1f\x8b"
+MISSING_GVKEY_VALUES = {"", ".", "na", "n/a", "nan", "null", "none", "<na>"}
 
 
 @dataclass(frozen=True)
@@ -35,6 +61,7 @@ class LoadedSeries:
     spec: SeriesSpec
     path: Path
     values: dict[tuple[str, str], float]
+    calls_without_gvkey: int
 
 
 SERIES_SPECS = [
@@ -89,8 +116,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=REPRODUCED_DIR,
         help=(
-            "Directory containing NLA *_firmlevel.csv files. "
+            "Directory containing NLA *_firmlevel.csv files or an unzipped NLA dataset ZIP. "
             f"Defaults to {REPRODUCED_DIR}."
+        ),
+    )
+    parser.add_argument(
+        "--gvkeys-file",
+        type=Path,
+        help=(
+            "GVKEY crosswalk (gvkeys.csv) for NLA files without a gvkey column. Defaults to the "
+            "one gvkeys.csv(.gz) or NLA_*_gvkeys.csv in the reproduced-data directory."
         ),
     )
     parser.add_argument(
@@ -124,6 +159,28 @@ def parse_float(value: str | None) -> float | None:
     if not math.isfinite(parsed):
         return None
     return parsed
+
+
+def normalize_gvkey(
+    value: str | None,
+    *,
+    source: Path | None = None,
+    row: int | None = None,
+    column: str = "gvkey",
+) -> str:
+    """Return a numeric GVKEY as six digits, so 1004, 1004.0 and 001004 match."""
+    text = (value or "").strip()
+    if text.lower() in MISSING_GVKEY_VALUES:
+        return ""
+    if re.fullmatch(r"[0-9]+(?:\.0+)?", text):
+        number = int(text.partition(".")[0])
+        if number < 2**63:
+            return f"{number:06d}"
+    location = f"{source}: row {row}: " if source is not None else ""
+    raise ValueError(
+        f"{location}invalid {column} {value!r}; expected a nonnegative integer GVKEY "
+        "within the signed 64-bit range"
+    )
 
 
 def parse_dateq(timestamp: str | None) -> str | None:
@@ -176,6 +233,18 @@ def format_elapsed(start: float) -> str:
     return f"{perf_counter() - start:.1f}s"
 
 
+def open_csv(path: Path) -> TextIO:
+    """Open a CSV as text, decompressing gzip bytes whatever the file name says.
+
+    Files downloaded from a series page can be gzip-encoded under a plain .csv name.
+    """
+    with path.open("rb") as handle:
+        is_gzip = handle.read(2) == GZIP_MAGIC
+    if is_gzip:
+        return gzip.open(path, "rt", newline="")
+    return path.open(newline="")
+
+
 def resolve_original_file(original_dir: Path, explicit_file: Path | None) -> Path:
     if explicit_file is not None:
         if not explicit_file.exists():
@@ -203,6 +272,65 @@ def resolve_reproduced_dir(reproduced_dir: Path) -> Path:
     return reproduced_dir
 
 
+def resolve_gvkey_crosswalk(reproduced_dir: Path, explicit_file: Path | None) -> Path:
+    if explicit_file is not None:
+        if not explicit_file.exists():
+            raise FileNotFoundError(f"GVKEY crosswalk not found: {explicit_file}")
+        return explicit_file
+
+    search_dirs = [reproduced_dir]
+    if reproduced_dir.name == "series":
+        search_dirs.append(reproduced_dir.parent)
+    candidates = sorted(
+        {
+            path
+            for directory in search_dirs
+            for pattern in GVKEY_CROSSWALK_PATTERNS
+            for path in directory.glob(pattern)
+        }
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"No GVKEY crosswalk found under {reproduced_dir}. NLA files without a gvkey column need the "
+            "measure's gvkeys.csv: it is at the root of the dataset ZIP, and a series page offers it as "
+            "NLA_*_gvkeys.csv. Put it in the reproduced-data directory or pass --gvkeys-file."
+        )
+    if len(candidates) > 1:
+        names = ", ".join(str(path) for path in candidates)
+        raise ValueError(f"Multiple GVKEY crosswalks found: {names}. Keep one or pass --gvkeys-file.")
+    return candidates[0]
+
+
+def read_gvkey_crosswalk(crosswalk_file: Path) -> dict[str, str]:
+    """Map nonblank earningscallID to GVKEY, retaining calls without a GVKEY as ''."""
+    gvkeys: dict[str, str] = {}
+    with open_csv(crosswalk_file) as handle:
+        reader = csv.DictReader(handle)
+        required = {CALL_ID_COLUMN, CROSSWALK_GVKEY_COLUMN}
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{crosswalk_file} is missing columns: {', '.join(sorted(missing))}")
+
+        for row in reader:
+            call_id = (row.get(CALL_ID_COLUMN) or "").strip()
+            if not call_id:
+                continue
+            gvkey = normalize_gvkey(
+                row.get(CROSSWALK_GVKEY_COLUMN),
+                source=crosswalk_file,
+                row=reader.line_num,
+                column=CROSSWALK_GVKEY_COLUMN,
+            )
+            known = gvkeys.get(call_id, "")
+            if known and gvkey and known != gvkey:
+                raise ValueError(
+                    f"{crosswalk_file} maps earningscallID {call_id} to more than one gvkey: {known}, {gvkey}"
+                )
+            gvkeys[call_id] = known or gvkey
+
+    return gvkeys
+
+
 def read_original(
     original_file: Path,
     columns: set[str],
@@ -219,7 +347,7 @@ def read_original(
             raise ValueError(f"{original_file} is missing columns: {', '.join(sorted(missing))}")
 
         for row in reader:
-            gvkey = (row.get("gvkey") or "").strip()
+            gvkey = normalize_gvkey(row.get("gvkey"), source=original_file, row=reader.line_num)
             dateq = (row.get("date") or "").strip()
             if not gvkey or not dateq:
                 continue
@@ -242,30 +370,74 @@ def read_original(
 
 def resolve_reproduced_file(reproduced_dir: Path, spec: SeriesSpec) -> Path | None:
     candidates = sorted(
-        reproduced_dir.glob(f"{REPRODUCED_FILE_PREFIX}*{spec.file_fragment}*_firmlevel.csv")
+        {
+            path
+            for pattern in REPRODUCED_FILE_PATTERNS
+            for path in reproduced_dir.glob(pattern.format(fragment=spec.file_fragment))
+        }
     )
     if not candidates:
         return None
     if len(candidates) > 1:
-        names = ", ".join(path.name for path in candidates)
+        names = ", ".join(reproduced_file_label(path) for path in candidates)
         raise ValueError(f"Multiple files match {spec.file_fragment!r} under {reproduced_dir}: {names}")
     return candidates[0]
 
 
-def load_reproduced_series(reproduced_file: Path, spec: SeriesSpec) -> LoadedSeries:
+def reproduced_file_label(path: Path) -> str:
+    if path.name.startswith(REPRODUCED_FILE_PREFIX):
+        return path.name
+    return f"{path.parent.name}/{path.name}"
+
+
+def has_gvkey_column(reproduced_file: Path) -> bool:
+    with open_csv(reproduced_file) as handle:
+        return "gvkey" in next(csv.reader(handle), [])
+
+
+def needs_gvkey_crosswalk(reproduced_dir: Path) -> bool:
+    for spec in SERIES_SPECS:
+        reproduced_file = resolve_reproduced_file(reproduced_dir, spec)
+        if reproduced_file is not None and not has_gvkey_column(reproduced_file):
+            return True
+    return False
+
+
+def load_reproduced_series(
+    reproduced_file: Path,
+    spec: SeriesSpec,
+    gvkey_crosswalk: dict[str, str] | None = None,
+) -> LoadedSeries:
     accumulators: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"numerator": 0.0, "nr_of_words": 0.0}
     )
+    calls_with_id = 0
+    crosswalk_matches = 0
+    calls_without_gvkey = 0
 
-    with reproduced_file.open(newline="") as handle:
+    with open_csv(reproduced_file) as handle:
         reader = csv.DictReader(handle)
-        required = {"gvkey", "start_time", spec.raw_measure_col, "nr_of_words"}
-        missing = required.difference(reader.fieldnames or [])
+        fieldnames = reader.fieldnames or []
+        uses_crosswalk = "gvkey" not in fieldnames
+        missing = {"start_time", spec.raw_measure_col, "nr_of_words"}.difference(fieldnames)
+        if uses_crosswalk and CALL_ID_COLUMN not in fieldnames:
+            missing.add(f"gvkey or {CALL_ID_COLUMN}")
         if missing:
             raise ValueError(f"{reproduced_file} is missing columns: {', '.join(sorted(missing))}")
+        if uses_crosswalk and gvkey_crosswalk is None:
+            raise ValueError(f"{reproduced_file} has no gvkey column and no GVKEY crosswalk was given.")
 
         for row in reader:
-            gvkey = (row.get("gvkey") or "").strip()
+            if uses_crosswalk and gvkey_crosswalk is not None:
+                call_id = (row.get(CALL_ID_COLUMN) or "").strip()
+                if call_id:
+                    calls_with_id += 1
+                    crosswalk_matches += int(call_id in gvkey_crosswalk)
+                gvkey = gvkey_crosswalk.get(call_id, "") if call_id else ""
+            else:
+                gvkey = normalize_gvkey(row.get("gvkey"), source=reproduced_file, row=reader.line_num)
+            if not gvkey:
+                calls_without_gvkey += 1
             dateq = parse_dateq(row.get("start_time"))
             numerator = parse_float(row.get(spec.raw_measure_col))
             nr_of_words = parse_float(row.get("nr_of_words"))
@@ -278,17 +450,28 @@ def load_reproduced_series(reproduced_file: Path, spec: SeriesSpec) -> LoadedSer
             bucket["numerator"] += numerator
             bucket["nr_of_words"] += nr_of_words
 
+    if uses_crosswalk and calls_with_id and not crosswalk_matches:
+        raise ValueError(
+            f"No earningscallID in {reproduced_file} is present in the crosswalk; "
+            "use the crosswalk that came with the firm-level files."
+        )
     values = {
         key: bucket["numerator"] / bucket["nr_of_words"]
         for key, bucket in accumulators.items()
         if bucket["nr_of_words"] > 0
     }
-    return LoadedSeries(spec=spec, path=reproduced_file, values=values)
+    return LoadedSeries(
+        spec=spec,
+        path=reproduced_file,
+        values=values,
+        calls_without_gvkey=calls_without_gvkey,
+    )
 
 
 def build_correlation_rows(
     version_dir: Path,
     original_by_column: dict[str, dict[tuple[str, str], float]],
+    gvkey_crosswalk: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[str]]:
     gvkey_dateq_rows: list[dict[str, object]] = []
     dateq_rows: list[dict[str, object]] = []
@@ -303,8 +486,9 @@ def build_correlation_rows(
             skipped.append(spec.series)
             continue
 
-        print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: loading {reproduced_file.name}", flush=True)
-        loaded = load_reproduced_series(reproduced_file, spec)
+        reproduced_label = reproduced_file_label(reproduced_file)
+        print(f"[{index}/{len(SERIES_SPECS)}] {spec.series}: loading {reproduced_label}", flush=True)
+        loaded = load_reproduced_series(reproduced_file, spec, gvkey_crosswalk)
         original_values = original_by_column[spec.original_column]
         common_keys = sorted(set(loaded.values).intersection(original_values))
         gvkey_dateq_pairs = [(loaded.values[key], original_values[key]) for key in common_keys]
@@ -331,7 +515,7 @@ def build_correlation_rows(
             "series": spec.series,
             "original_column": spec.original_column,
             "reproduced_value": spec.reproduced_value,
-            "reproduced_file": loaded.path.name,
+            "reproduced_file": reproduced_label,
             "first_dateQ": common_dateqs[0] if common_dateqs else "",
             "last_dateQ": common_dateqs[-1] if common_dateqs else "",
         }
@@ -357,7 +541,8 @@ def build_correlation_rows(
             f"[{index}/{len(SERIES_SPECS)}] {spec.series}: matched "
             f"{len(gvkey_dateq_pairs):,} firm-quarters across {len(common_dateqs):,} quarters "
             f"(firm-quarter r={format_pearson(gvkey_dateq_pearson)}, "
-            f"quarter r={format_pearson(dateq_pearson)}, {format_elapsed(step_start)})",
+            f"quarter r={format_pearson(dateq_pearson)}, "
+            f"{loaded.calls_without_gvkey:,} calls without a GVKEY, {format_elapsed(step_start)})",
             flush=True,
         )
 
@@ -382,6 +567,13 @@ def main() -> None:
     print(f"Original file: {original_file}", flush=True)
     print(f"Reproduced directory: {reproduced_dir}", flush=True)
 
+    gvkey_crosswalk = None
+    if needs_gvkey_crosswalk(reproduced_dir):
+        crosswalk_file = resolve_gvkey_crosswalk(reproduced_dir, args.gvkeys_file)
+        gvkey_crosswalk = read_gvkey_crosswalk(crosswalk_file)
+        mapped_calls = sum(bool(gvkey) for gvkey in gvkey_crosswalk.values())
+        print(f"GVKEY crosswalk: {crosswalk_file} ({mapped_calls:,} calls with a GVKEY)", flush=True)
+
     original_columns = {spec.original_column for spec in SERIES_SPECS}
     print("Reading original firm-quarter scores...", flush=True)
     original_by_column = read_original(original_file, original_columns)
@@ -396,6 +588,7 @@ def main() -> None:
     gvkey_dateq_rows, dateq_rows, skipped = build_correlation_rows(
         reproduced_dir,
         original_by_column,
+        gvkey_crosswalk,
     )
     if not gvkey_dateq_rows:
         raise SystemExit(f"No matching NLA firmlevel files found under {reproduced_dir}.")

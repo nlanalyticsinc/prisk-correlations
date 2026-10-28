@@ -12,3 +12,10 @@ notebook = [
     "jupyterlab>=4",
     "nbconvert>=7",
 ]
+test = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
