@@ -7,6 +7,7 @@ import argparse
 import csv
 import gzip
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,7 @@ GVKEY_CROSSWALK_PATTERNS = (
 CALL_ID_COLUMN = "earningscallID"
 CROSSWALK_GVKEY_COLUMN = "gvkey_compustat"
 GZIP_MAGIC = b"\x1f\x8b"
+MISSING_GVKEY_VALUES = {"", ".", "na", "n/a", "nan", "null", "none", "<na>"}
 
 
 @dataclass(frozen=True)
@@ -159,12 +161,26 @@ def parse_float(value: str | None) -> float | None:
     return parsed
 
 
-def normalize_gvkey(value: str | None) -> str:
+def normalize_gvkey(
+    value: str | None,
+    *,
+    source: Path | None = None,
+    row: int | None = None,
+    column: str = "gvkey",
+) -> str:
     """Return a numeric GVKEY as six digits, so 1004, 1004.0 and 001004 match."""
-    number = parse_float(value)
-    if number is None or not number.is_integer():
-        return (value or "").strip()
-    return f"{int(number):06d}"
+    text = (value or "").strip()
+    if text.lower() in MISSING_GVKEY_VALUES:
+        return ""
+    if re.fullmatch(r"[0-9]+(?:\.0+)?", text):
+        number = int(text.partition(".")[0])
+        if number < 2**63:
+            return f"{number:06d}"
+    location = f"{source}: row {row}: " if source is not None else ""
+    raise ValueError(
+        f"{location}invalid {column} {value!r}; expected a nonnegative integer GVKEY "
+        "within the signed 64-bit range"
+    )
 
 
 def parse_dateq(timestamp: str | None) -> str | None:
@@ -286,7 +302,7 @@ def resolve_gvkey_crosswalk(reproduced_dir: Path, explicit_file: Path | None) ->
 
 
 def read_gvkey_crosswalk(crosswalk_file: Path) -> dict[str, str]:
-    """Map earningscallID to GVKEY; calls with a blank gvkey_compustat are left out."""
+    """Map nonblank earningscallID to GVKEY, retaining calls without a GVKEY as ''."""
     gvkeys: dict[str, str] = {}
     with open_csv(crosswalk_file) as handle:
         reader = csv.DictReader(handle)
@@ -297,14 +313,20 @@ def read_gvkey_crosswalk(crosswalk_file: Path) -> dict[str, str]:
 
         for row in reader:
             call_id = (row.get(CALL_ID_COLUMN) or "").strip()
-            gvkey = normalize_gvkey(row.get(CROSSWALK_GVKEY_COLUMN))
-            if not call_id or not gvkey:
+            if not call_id:
                 continue
-            known = gvkeys.setdefault(call_id, gvkey)
-            if known != gvkey:
+            gvkey = normalize_gvkey(
+                row.get(CROSSWALK_GVKEY_COLUMN),
+                source=crosswalk_file,
+                row=reader.line_num,
+                column=CROSSWALK_GVKEY_COLUMN,
+            )
+            known = gvkeys.get(call_id, "")
+            if known and gvkey and known != gvkey:
                 raise ValueError(
                     f"{crosswalk_file} maps earningscallID {call_id} to more than one gvkey: {known}, {gvkey}"
                 )
+            gvkeys[call_id] = known or gvkey
 
     return gvkeys
 
@@ -325,7 +347,7 @@ def read_original(
             raise ValueError(f"{original_file} is missing columns: {', '.join(sorted(missing))}")
 
         for row in reader:
-            gvkey = normalize_gvkey(row.get("gvkey"))
+            gvkey = normalize_gvkey(row.get("gvkey"), source=original_file, row=reader.line_num)
             dateq = (row.get("date") or "").strip()
             if not gvkey or not dateq:
                 continue
@@ -389,7 +411,8 @@ def load_reproduced_series(
     accumulators: dict[tuple[str, str], dict[str, float]] = defaultdict(
         lambda: {"numerator": 0.0, "nr_of_words": 0.0}
     )
-    calls = 0
+    calls_with_id = 0
+    crosswalk_matches = 0
     calls_without_gvkey = 0
 
     with open_csv(reproduced_file) as handle:
@@ -405,11 +428,14 @@ def load_reproduced_series(
             raise ValueError(f"{reproduced_file} has no gvkey column and no GVKEY crosswalk was given.")
 
         for row in reader:
-            calls += 1
             if uses_crosswalk and gvkey_crosswalk is not None:
-                gvkey = gvkey_crosswalk.get((row.get(CALL_ID_COLUMN) or "").strip(), "")
+                call_id = (row.get(CALL_ID_COLUMN) or "").strip()
+                if call_id:
+                    calls_with_id += 1
+                    crosswalk_matches += int(call_id in gvkey_crosswalk)
+                gvkey = gvkey_crosswalk.get(call_id, "") if call_id else ""
             else:
-                gvkey = normalize_gvkey(row.get("gvkey"))
+                gvkey = normalize_gvkey(row.get("gvkey"), source=reproduced_file, row=reader.line_num)
             if not gvkey:
                 calls_without_gvkey += 1
             dateq = parse_dateq(row.get("start_time"))
@@ -424,9 +450,9 @@ def load_reproduced_series(
             bucket["numerator"] += numerator
             bucket["nr_of_words"] += nr_of_words
 
-    if uses_crosswalk and calls and calls_without_gvkey == calls:
+    if uses_crosswalk and calls_with_id and not crosswalk_matches:
         raise ValueError(
-            f"No earningscallID in {reproduced_file} has a GVKEY in the crosswalk; "
+            f"No earningscallID in {reproduced_file} is present in the crosswalk; "
             "use the crosswalk that came with the firm-level files."
         )
     values = {
@@ -545,7 +571,8 @@ def main() -> None:
     if needs_gvkey_crosswalk(reproduced_dir):
         crosswalk_file = resolve_gvkey_crosswalk(reproduced_dir, args.gvkeys_file)
         gvkey_crosswalk = read_gvkey_crosswalk(crosswalk_file)
-        print(f"GVKEY crosswalk: {crosswalk_file} ({len(gvkey_crosswalk):,} calls with a GVKEY)", flush=True)
+        mapped_calls = sum(bool(gvkey) for gvkey in gvkey_crosswalk.values())
+        print(f"GVKEY crosswalk: {crosswalk_file} ({mapped_calls:,} calls with a GVKEY)", flush=True)
 
     original_columns = {spec.original_column for spec in SERIES_SPECS}
     print("Reading original firm-quarter scores...", flush=True)

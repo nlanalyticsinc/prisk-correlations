@@ -76,6 +76,10 @@ For an NLA file without `gvkey`, the script joins `gvkey_compustat` on `earnings
 
 GVKEYs are compared as six-digit strings, so `1004` in one file matches `001004` in the other.
 
+Call IDs are trimmed, and blank IDs are ignored. Crosswalk overlap is checked using call IDs, including calls whose GVKEY is missing; a file with nonblank call IDs that are all absent from the crosswalk fails. A series with no usable GVKEYs produces zero matched pairs.
+
+GVKEYs accept digits with an optional all-zero decimal part (`001004`, `1004`, `1004.0`), within the signed 64-bit range. Blank values and the case-insensitive markers `.`, `NA`, `N/A`, `NaN`, `NULL`, `None`, and `<NA>` mean missing. Malformed nonmissing GVKEYs fail with the source file and row number. These rules apply to the crosswalk and both original and reproduced inputs.
+
 ## What Is Compared
 
 The script compares these original columns against the matching reproduced NLA files:

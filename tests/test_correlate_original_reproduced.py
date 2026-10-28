@@ -167,7 +167,7 @@ def test_crosswalk_from_another_download_is_rejected(monkeypatch: pytest.MonkeyP
     reproduced_dir = tmp_path / "reproduced"
     write_layout(reproduced_dir, "dataset_zip", {"other-call": "001004"})
 
-    with pytest.raises(ValueError, match="No earningscallID in .* has a GVKEY in the crosswalk"):
+    with pytest.raises(ValueError, match="No earningscallID in .* is present in the crosswalk"):
         run_script(monkeypatch, tmp_path, reproduced_dir)
 
 
@@ -226,3 +226,104 @@ def test_read_gvkey_crosswalk_rejects_conflicting_gvkeys(tmp_path: Path) -> None
 )
 def test_normalize_gvkey(value: str | None, expected: str) -> None:
     assert script.normalize_gvkey(value) == expected
+
+
+@pytest.mark.parametrize("value", ["   ", "NaN", "NULL", "N/A", "NA", "None", "<NA>", "."])
+def test_normalize_gvkey_recognizes_missing_markers(value: str) -> None:
+    assert script.normalize_gvkey(value) == ""
+
+
+@pytest.mark.parametrize("value", ["broken", "1004.5", "-1", "inf", "9223372036854775808", "1.0000000000000001"])
+def test_normalize_gvkey_rejects_malformed_identifiers(value: str) -> None:
+    with pytest.raises(ValueError, match="invalid gvkey"):
+        script.normalize_gvkey(value)
+
+
+@pytest.mark.parametrize("gvkeys", [["", "1004", "001004"], ["1004", "001004", ""]])
+def test_missing_duplicate_does_not_replace_known_gvkey(tmp_path: Path, gvkeys: list[str]) -> None:
+    path = tmp_path / "gvkeys.csv"
+    write_text(path, csv_text(["earningscallID", "gvkey_compustat"], [["call-1", key] for key in gvkeys]))
+
+    assert script.read_gvkey_crosswalk(path) == {"call-1": "001004"}
+
+
+def test_missing_gvkeys_do_not_create_a_fictitious_firm(tmp_path: Path) -> None:
+    path = tmp_path / "gvkeys.csv"
+    write_crosswalk(path, {"call-1": "NaN", "call-2": "NULL"})
+    calls = tmp_path / "firmlevel.csv"
+    write_text(
+        calls,
+        "earningscallID,start_time,risk,nr_of_words\n"
+        "call-1,2020-01-01,1,1000\ncall-2,2020-01-02,10,1000\n",
+    )
+    crosswalk = script.read_gvkey_crosswalk(path)
+
+    loaded = script.load_reproduced_series(calls, script.SERIES_SPECS[0], crosswalk)
+
+    assert crosswalk == {"call-1": "", "call-2": ""}
+    assert loaded.values == {}
+    assert loaded.calls_without_gvkey == 2
+
+
+def test_blank_call_ids_cannot_contaminate_a_firm_quarter(tmp_path: Path) -> None:
+    path = tmp_path / "gvkeys.csv"
+    write_crosswalk(path, {"   ": "001004", "": "001005", "call-1": "001004"})
+    calls = tmp_path / "firmlevel.csv"
+    write_text(
+        calls,
+        "earningscallID,start_time,risk,nr_of_words\n"
+        "   ,2020-01-01,100,1000\n,2020-01-01,100,1000\n call-1 ,2020-01-01,1,1000\n",
+    )
+    crosswalk = script.read_gvkey_crosswalk(path)
+
+    loaded = script.load_reproduced_series(calls, script.SERIES_SPECS[0], crosswalk)
+
+    assert crosswalk == {"call-1": "001004"}
+    assert loaded.values == {("001004", "2020q1"): 0.001}
+    assert loaded.calls_without_gvkey == 2
+
+
+def test_all_missing_call_ids_are_skipped(tmp_path: Path) -> None:
+    path = tmp_path / "firmlevel.csv"
+    write_text(path, "earningscallID,start_time,risk,nr_of_words\n   ,2020-01-01,1,1000\n")
+
+    loaded = script.load_reproduced_series(path, script.SERIES_SPECS[0], {"other-call": "001004"})
+
+    assert loaded.values == {}
+    assert loaded.calls_without_gvkey == 1
+
+
+def test_known_calls_without_gvkeys_produce_zero_pairs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reproduced_dir = tmp_path / "reproduced"
+    write_layout(reproduced_dir, "dataset_zip", {call_id: "NaN" for call_id in crosswalk_gvkeys()})
+
+    firm_quarter_rows, quarter_rows = run_script(monkeypatch, tmp_path, reproduced_dir)
+
+    assert [row["n_pairs"] for row in firm_quarter_rows] == ["0", "0"]
+    assert [row["n_pairs"] for row in quarter_rows] == ["0", "0"]
+    output = capsys.readouterr().out
+    assert "0 calls with a GVKEY" in output
+    assert "6 calls without a GVKEY" in output
+
+
+@pytest.mark.parametrize("source", ["crosswalk", "original", "firmlevel"])
+def test_invalid_gvkey_reports_file_and_row(tmp_path: Path, source: str) -> None:
+    path = tmp_path / f"{source}.csv"
+    with pytest.raises(ValueError, match="row 3: invalid gvkey") as error:
+        if source == "crosswalk":
+            write_crosswalk(path, {"call-1": "001004", "call-2": "broken"})
+            script.read_gvkey_crosswalk(path)
+        elif source == "original":
+            write_text(path, "gvkey\tdate\tPRisk\n001004\t2020q1\t1\nbroken\t2020q2\t2\n")
+            script.read_original(path, {"PRisk"})
+        else:
+            write_text(
+                path,
+                "gvkey,start_time,risk,nr_of_words\n001004,2020-01-01,1,1000\nbroken,2020-04-01,2,1000\n",
+            )
+            script.load_reproduced_series(path, script.SERIES_SPECS[0])
+
+    assert str(path) in str(error.value)
+    assert "broken" in str(error.value)
